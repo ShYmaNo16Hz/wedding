@@ -166,7 +166,7 @@
           </div>
           <div class="d-sm-none">
             <p class="drop-zone__title">
-              Alege <br />fotografiile și videoclipurile <br />din galerie
+              Alege fotografiile și videoclipurile <br />din galerie
             </p>
           </div>
           <p class="drop-zone__hint">
@@ -595,7 +595,7 @@ export default {
 }
 
 .drop-zone__title {
-  font-size: 1.15rem;
+  font-size: 1rem;
   color: var(--cream);
   margin: 0;
 }
@@ -772,6 +772,9 @@ export default {
   }
   .drop-zone {
     padding: 10px 1rem;
+  }
+  .drop-zone__title {
+    font-size: 1.15rem;
   }
 }
 
