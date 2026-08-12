@@ -79,7 +79,7 @@
 
         <!-- Stare: se încarcă -->
         <div v-if="isUploading" class="drop-zone__uploading">
-          <div class="upload-spinner" aria-hidden="true"></div>
+          <Spinner />
           <p class="uploading-label">
             Se încarcă {{ currentUploadIndex }} din {{ pendingFiles.length }}…
           </p>
@@ -239,6 +239,7 @@
 <script>
 import cupluImg from "@/assets/za-cuplu.png";
 import HeartImage from "@/components/HeartImage.vue";
+import Spinner from "@/components/Spinner.vue";
 
 // ─── CONFIGURARE ─────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -254,7 +255,7 @@ const CONFIG = {
 export default {
   name: "WeddingUpload",
 
-  components: { HeartImage },
+  components: { HeartImage, Spinner },
 
   data() {
     return {
