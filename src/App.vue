@@ -629,6 +629,13 @@ export default {
   border-top-color: var(--gold);
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
+  -webkit-animation: spin 0.9s linear infinite;
+}
+@-webkit-keyframes spin {
+  to {
+    -webkit-transform: rotate(360deg);
+    transform: rotate(360deg);
+  }
 }
 @keyframes spin {
   to {
@@ -761,7 +768,7 @@ export default {
 /* ── Responsive ── */
 @media (max-width: 576px) {
   .hero {
-    padding: 3.5rem 1rem 0;
+    padding: 1.5rem 1rem 0;
   }
   .drop-zone {
     padding: 10px 1rem;
