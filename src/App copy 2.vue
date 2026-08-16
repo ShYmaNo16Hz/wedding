@@ -81,7 +81,7 @@
         <div v-if="isUploading" class="drop-zone__uploading">
           <Spinner />
           <p class="uploading-label">
-            Se încarcă {{ doneCount }} din {{ queue.length }}…
+            Se încarcă {{ currentUploadIndex }} din {{ pendingFiles.length }}…
           </p>
           <div class="progress-track">
             <div
@@ -89,10 +89,6 @@
               :style="{ width: overallProgress + '%' }"
             ></div>
           </div>
-          <p class="drop-zone__hint">
-            Te rugăm nu închide tab-ul și nu bloca ecranul telefonului cât timp
-            se încarcă ✦
-          </p>
         </div>
 
         <!-- Stare: după upload reușit -->
@@ -252,12 +248,6 @@ const CONFIG = {
   date: "30 august 2026",
   tagline: "Împărtășiți momentele voastre cu noi ✦",
 };
-
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB — mai robust pe conexiuni slabe
-const MAX_RETRIES = 8;
-const CONCURRENCY = 2; // cate fisiere se incarca in paralel
-const STORAGE_PREFIX = "wedding-upload:";
-const SESSION_MAX_AGE_MS = 6 * 24 * 60 * 60 * 1000; // sesiunile Google expira ~7 zile
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
@@ -271,35 +261,24 @@ export default {
       isDragging: false,
       isUploading: false,
       uploadError: null,
-      queue: [], // toate fisierele din sesiunea curenta, fiecare cu status + progress propriu
+      pendingFiles: [],
+      uploadedFiles: [],
+      errorFiles: [],
+      currentUploadIndex: 0,
+      currentFileProgress: 0,
       showSummary: false,
-      wakeLock: null,
     };
   },
 
   computed: {
-    uploadedFiles() {
-      return this.queue.filter((f) => f.status === "done");
-    },
-    errorFiles() {
-      return this.queue.filter((f) => f.status === "error");
-    },
     overallProgress() {
-      if (!this.queue.length) return 0;
-      const total = this.queue.reduce((sum, f) => sum + (f.progress || 0), 0);
-      return total / this.queue.length;
+      const done = this.currentUploadIndex - 1;
+      const total = this.pendingFiles.length;
+      if (total === 0) return 0;
+      const base = (done / total) * 100;
+      const current = this.currentFileProgress / total;
+      return Math.min(base + current, 100);
     },
-    doneCount() {
-      return this.uploadedFiles.length + this.errorFiles.length;
-    },
-  },
-
-  mounted() {
-    this.purgeExpiredSessions();
-  },
-
-  beforeUnmount() {
-    this.releaseWakeLock();
   },
 
   methods: {
@@ -329,280 +308,74 @@ export default {
       );
       if (!valid.length) return;
 
-      const newItems = valid.map((f) => ({
+      this.pendingFiles = valid.map((f) => ({
         file: f,
-        id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        // nume tehnic unic trimis la Drive, ca sa evitam coliziuni intre invitati
-        driveName: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${f.name}`,
+        id: Date.now() + Math.random(),
         name: f.name,
         isVideo: f.type.startsWith("video/"),
         preview: URL.createObjectURL(f),
         status: "pending",
-        progress: 0,
-        error: null,
       }));
 
-      // poze intai (feedback rapid), apoi video-uri de la mic la mare
-      newItems.sort((a, b) => {
-        if (a.isVideo !== b.isVideo) return a.isVideo ? 1 : -1;
-        return a.file.size - b.file.size;
-      });
-
-      this.queue.push(...newItems);
       this.startUploadQueue();
     },
 
-    // ── Coadă cu concurență limitată ───────────────────────────────────────────
+    // ── Upload queue ──────────────────────────────────────────────────────────
     async startUploadQueue() {
-      if (this.isUploading) return; // deja ruleaza, fisierele noi se alatura cozii
       this.isUploading = true;
-      await this.requestWakeLock();
+      this.currentUploadIndex = 0;
 
-      const workers = Array.from({ length: CONCURRENCY }, () =>
-        this.runWorker(),
-      );
-      await Promise.all(workers);
+      for (let i = 0; i < this.pendingFiles.length; i++) {
+        this.currentUploadIndex = i + 1;
+        this.currentFileProgress = 0;
+        const item = this.pendingFiles[i];
+        try {
+          await this.uploadFile(item);
+          this.uploadedFiles.push({ ...item, status: "done" });
+        } catch (err) {
+          this.errorFiles.push({
+            ...item,
+            status: "error",
+            error: err.message,
+          });
+        }
+      }
 
-      await this.releaseWakeLock();
       this.isUploading = false;
+      this.pendingFiles = [];
       this.showSummary = this.uploadedFiles.length > 0;
     },
 
-    async runWorker() {
-      while (true) {
-        const item = this.queue.find((f) => f.status === "pending");
-        if (!item) return;
-        item.status = "uploading";
-        try {
-          await this.uploadFile(item);
-          item.status = "done";
-          item.progress = 100;
-          this.clearStoredSession(item);
-        } catch (err) {
-          item.status = "error";
-          item.error = err.message;
-        }
-      }
-    },
-
-    // ── Wake Lock: incearca sa previna stingerea ecranului cat timp se incarca ─
-    async requestWakeLock() {
-      try {
-        if ("wakeLock" in navigator) {
-          this.wakeLock = await navigator.wakeLock.request("screen");
-          document.addEventListener("visibilitychange", this.reacquireWakeLock);
-        }
-      } catch (e) {
-        this.wakeLock = null; // nesuportat/refuzat - continuam fara el
-      }
-    },
-
-    async reacquireWakeLock() {
-      if (
-        document.visibilityState === "visible" &&
-        this.isUploading &&
-        !this.wakeLock
-      ) {
-        try {
-          this.wakeLock = await navigator.wakeLock.request("screen");
-        } catch (e) {
-          // ignorat
-        }
-      }
-    },
-
-    async releaseWakeLock() {
-      document.removeEventListener("visibilitychange", this.reacquireWakeLock);
-      if (this.wakeLock) {
-        try {
-          await this.wakeLock.release();
-        } catch (e) {
-          // ignorat
-        }
-        this.wakeLock = null;
-      }
-    },
-
-    // ── Persistare sesiune (reluare dupa refresh/inchidere tab) ─────────────────
-    storageKey(item) {
-      // cheie stabila din identitatea fisierului, NU din driveName (care e mereu nou)
-      return `${STORAGE_PREFIX}${item.file.name}::${item.file.size}::${item.file.lastModified}`;
-    },
-
-    saveSession(item, uploadUrl) {
-      try {
-        localStorage.setItem(
-          this.storageKey(item),
-          JSON.stringify({ uploadUrl, savedAt: Date.now() }),
-        );
-      } catch (e) {
-        // localStorage plin sau indisponibil (mod privat) - nu e fatal
-      }
-    },
-
-    loadSession(item) {
-      try {
-        const raw = localStorage.getItem(this.storageKey(item));
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (Date.now() - parsed.savedAt > SESSION_MAX_AGE_MS) {
-          localStorage.removeItem(this.storageKey(item));
-          return null; // probabil expirata pe Google
-        }
-        return parsed;
-      } catch (e) {
-        return null;
-      }
-    },
-
-    clearStoredSession(item) {
-      try {
-        localStorage.removeItem(this.storageKey(item));
-      } catch (e) {
-        // ignorat
-      }
-    },
-
-    purgeExpiredSessions() {
-      try {
-        Object.keys(localStorage)
-          .filter((k) => k.startsWith(STORAGE_PREFIX))
-          .forEach((k) => {
-            try {
-              const parsed = JSON.parse(localStorage.getItem(k));
-              if (Date.now() - parsed.savedAt > SESSION_MAX_AGE_MS) {
-                localStorage.removeItem(k);
-              }
-            } catch (e) {
-              localStorage.removeItem(k); // intrare corupta
-            }
-          });
-      } catch (e) {
-        // ignorat
-      }
-    },
-
-    // ── Upload-ul propriu-zis: sesiune + chunk-uri + reluare ────────────────────
-    async uploadFile(item) {
-      const file = item.file;
-      const mimeType = file.type || "application/octet-stream";
-
-      let uploadUrl;
-      let offset = 0;
-      const existing = this.loadSession(item);
-
-      if (existing) {
-        // exista o sesiune neterminata (tab inchis/refresh) - intrebam Google unde a ramas
-        uploadUrl = existing.uploadUrl;
-        offset = await this.queryUploadOffset(uploadUrl, file.size);
-        if (offset >= file.size) {
-          item.progress = 100;
-          this.clearStoredSession(item);
-          return; // era deja complet
-        }
-      } else {
-        const sessionRes = await fetch("/api/upload-session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: item.driveName,
-            mimeType,
-            size: file.size,
-          }),
-        });
-
-        if (!sessionRes.ok) {
-          const err = await sessionRes.json().catch(() => ({}));
-          throw new Error(err.error || "Nu am putut porni upload-ul");
-        }
-
-        ({ uploadUrl } = await sessionRes.json());
-        this.saveSession(item, uploadUrl);
-      }
-
-      let attempt = 0;
-
-      while (offset < file.size) {
-        const end = Math.min(offset + CHUNK_SIZE, file.size);
-        const chunk = file.slice(offset, end);
-
-        try {
-          const result = await this.putChunk(
-            uploadUrl,
-            chunk,
-            offset,
-            end,
-            file.size,
-            mimeType,
-          );
-          attempt = 0; // reset dupa succes
-          if (result.done) {
-            item.progress = 100;
-            this.clearStoredSession(item);
-            return;
-          }
-          offset = result.nextOffset;
-          item.progress = (offset / file.size) * 100;
-        } catch (e) {
-          attempt++;
-          if (attempt > MAX_RETRIES) {
-            throw new Error(
-              "Upload eșuat după mai multe încercări. Poți încerca din nou — reia automat de unde a rămas.",
-            );
-          }
-          offset = await this.queryUploadOffset(uploadUrl, file.size);
-          const backoff = Math.min(1000 * 2 ** attempt, 30000); // exponential, plafon 30s
-          await new Promise((r) => setTimeout(r, backoff));
-        }
-      }
-    },
-
-    putChunk(uploadUrl, chunk, start, end, totalSize, mimeType) {
+    // ── Upload direct la Vercel Function → Google Drive ───────────────────────
+    uploadFile(item) {
       return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append("file", item.file, item.name);
+
         const xhr = new XMLHttpRequest();
-        xhr.open("PUT", uploadUrl);
-        xhr.setRequestHeader("Content-Type", mimeType);
-        xhr.setRequestHeader(
-          "Content-Range",
-          `bytes ${start}-${end - 1}/${totalSize}`,
-        );
+        xhr.open("POST", "/api/upload");
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            this.currentFileProgress = (e.loaded / e.total) * 100;
+          }
+        };
 
         xhr.onload = () => {
-          if (xhr.status === 200 || xhr.status === 201) {
-            resolve({ done: true });
-          } else if (xhr.status === 308) {
-            const range = xhr.getResponseHeader("Range");
-            const nextOffset = range
-              ? parseInt(range.split("-")[1], 10) + 1
-              : end;
-            resolve({ done: false, nextOffset });
+          if (xhr.status === 200) {
+            resolve();
           } else {
-            reject(new Error(`HTTP ${xhr.status}`));
+            try {
+              const err = JSON.parse(xhr.responseText);
+              reject(new Error(err.error || `HTTP ${xhr.status}`));
+            } catch {
+              reject(new Error(`HTTP ${xhr.status}`));
+            }
           }
         };
 
         xhr.onerror = () => reject(new Error("Eroare de rețea"));
-        xhr.send(chunk);
-      });
-    },
-
-    queryUploadOffset(uploadUrl, totalSize) {
-      return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("PUT", uploadUrl);
-        xhr.setRequestHeader("Content-Range", `bytes */${totalSize}`);
-        xhr.onload = () => {
-          if (xhr.status === 308) {
-            const range = xhr.getResponseHeader("Range");
-            resolve(range ? parseInt(range.split("-")[1], 10) + 1 : 0);
-          } else if (xhr.status === 200 || xhr.status === 201) {
-            resolve(totalSize);
-          } else {
-            resolve(0);
-          }
-        };
-        xhr.onerror = () => resolve(0);
-        xhr.send();
+        xhr.send(formData);
       });
     },
 
