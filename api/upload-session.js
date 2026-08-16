@@ -33,6 +33,9 @@ export default async function handler(req, res) {
     const auth = getAuthClient();
     const { token } = await auth.getAccessToken();
 
+    // în /api/upload-session.js, în interiorul cererii fetch care creeaza sesiunea
+
+    const origin = req.headers.origin || `https://${req.headers.host}`;
     const initRes = await fetch(
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size",
       {
@@ -42,6 +45,7 @@ export default async function handler(req, res) {
           "Content-Type": "application/json; charset=UTF-8",
           "X-Upload-Content-Type": mimeType || "application/octet-stream",
           "X-Upload-Content-Length": String(size),
+          Origin: origin, // ← esențial: fără asta, PUT-ul din browser primește CORS error
         },
         body: JSON.stringify({
           name: filename,
