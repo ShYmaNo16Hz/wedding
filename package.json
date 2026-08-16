@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "bootstrap": "^5.3.8",
+    "googleapis": "^174.0.1",
+    "stream": "^0.0.3",
     "vue": "^3.5.38"
   },
   "devDependencies": {
