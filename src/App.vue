@@ -247,14 +247,11 @@ const CONFIG = {
   groom: "Daniel",
   date: "30 august 2026",
   tagline: "Împărtășiți momentele voastre cu noi ✦",
-  appsScriptUrl:
-    "https://script.google.com/macros/s/AKfycbyFbzFoBmIzqP_O24fcfZJdMp45hMcgs-VaX7jf48bXRUooaHJCfRwhAhJHN4Ew3Dtr/exec",
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
   name: "WeddingUpload",
-
   components: { HeartImage, Spinner },
 
   data() {
@@ -306,7 +303,6 @@ export default {
 
     processFiles(files) {
       this.uploadError = null;
-
       const valid = files.filter(
         (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
       );
@@ -334,7 +330,7 @@ export default {
         this.currentFileProgress = 0;
         const item = this.pendingFiles[i];
         try {
-          await this.uploadViaAppsScript(item);
+          await this.uploadFile(item);
           this.uploadedFiles.push({ ...item, status: "done" });
         } catch (err) {
           this.errorFiles.push({
@@ -350,45 +346,36 @@ export default {
       this.showSummary = this.uploadedFiles.length > 0;
     },
 
-    // ── Upload via Google Apps Script ─────────────────────────────────────────
-    uploadViaAppsScript(item) {
+    // ── Upload direct la Vercel Function → Google Drive ───────────────────────
+    uploadFile(item) {
       return new Promise((resolve, reject) => {
-        const reader = new FileReader();
+        const formData = new FormData();
+        formData.append("file", item.file, item.name);
 
-        reader.onprogress = (e) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload");
+
+        xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
-            this.currentFileProgress = (e.loaded / e.total) * 50;
+            this.currentFileProgress = (e.loaded / e.total) * 100;
           }
         };
 
-        reader.onload = async () => {
-          try {
-            const base64 = reader.result.split(",")[1];
-            this.currentFileProgress = 50;
-
-            const response = await fetch(CONFIG.appsScriptUrl, {
-              method: "POST",
-              headers: { "Content-Type": "text/plain" },
-              body: JSON.stringify({
-                name: item.name,
-                mimeType: item.file.type || "image/jpeg",
-                file: base64,
-              }),
-            });
-
-            this.currentFileProgress = 100;
-
-            if (!response.ok && response.status !== 0) {
-              throw new Error(`HTTP ${response.status}`);
-            }
+        xhr.onload = () => {
+          if (xhr.status === 200) {
             resolve();
-          } catch (err) {
-            reject(err);
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText);
+              reject(new Error(err.error || `HTTP ${xhr.status}`));
+            } catch {
+              reject(new Error(`HTTP ${xhr.status}`));
+            }
           }
         };
 
-        reader.onerror = () => reject(new Error("Nu s-a putut citi fișierul"));
-        reader.readAsDataURL(item.file);
+        xhr.onerror = () => reject(new Error("Eroare de rețea"));
+        xhr.send(formData);
       });
     },
 
@@ -419,10 +406,8 @@ export default {
 </script>
 
 <style scoped>
-/* ── Fonts ── */
 @import url("https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap");
 
-/* ── Tokens ── */
 :root {
   --gold: #e8c97a;
   --gold-dark: #c9a84c;
@@ -435,7 +420,6 @@ export default {
   --radius: 14px;
 }
 
-/* ── Base ── */
 .wedding-app {
   min-height: 100vh;
   background: var(--night);
@@ -446,7 +430,6 @@ export default {
   overflow-x: hidden;
 }
 
-/* ── Particles ── */
 .particles {
   position: fixed;
   inset: 0;
@@ -474,7 +457,6 @@ export default {
   }
 }
 
-/* ── Hero ── */
 .hero {
   padding: 5rem 1rem 3.5rem;
   position: relative;
@@ -528,7 +510,6 @@ export default {
   letter-spacing: 0.05em;
 }
 
-/* ── Upload section ── */
 .upload-section {
   position: relative;
   z-index: 1;
@@ -536,7 +517,6 @@ export default {
   padding-bottom: 4rem;
 }
 
-/* ── Drop zone ── */
 .drop-zone {
   border: 2px dashed rgba(232, 201, 122, 0.3);
   border-radius: var(--radius);
@@ -564,20 +544,17 @@ export default {
   cursor: default;
   pointer-events: none;
 }
-/* stare după upload — border auriu subtil permanent */
 .drop-zone--done {
   border-color: rgba(232, 201, 122, 0.55);
   border-style: solid;
 }
 
-/* idle / success shared */
 .drop-zone__idle {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0.5rem;
 }
-
 .drop-icon {
   width: 56px;
   height: 56px;
@@ -589,12 +566,10 @@ export default {
   width: 100%;
   height: 100%;
 }
-
 .success-icon {
   font-size: 2.5rem;
   margin-bottom: 0.25rem;
 }
-
 .drop-zone__title {
   font-size: 1rem;
   color: var(--cream);
@@ -616,32 +591,11 @@ export default {
   text-decoration: underline;
 }
 
-/* uploading state */
 .drop-zone__uploading {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 1rem;
-}
-.upload-spinner {
-  width: 48px;
-  height: 48px;
-  border: 3px solid rgba(232, 201, 122, 0.2);
-  border-top-color: var(--gold);
-  border-radius: 50%;
-  animation: spin 0.9s linear infinite;
-  -webkit-animation: spin 0.9s linear infinite;
-}
-@-webkit-keyframes spin {
-  to {
-    -webkit-transform: rotate(360deg);
-    transform: rotate(360deg);
-  }
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .uploading-label {
   font-size: 0.9rem;
@@ -662,7 +616,6 @@ export default {
   transition: width 0.2s linear;
 }
 
-/* ── Preview grid ── */
 .preview-card {
   border-radius: 10px;
   overflow: hidden;
@@ -722,7 +675,6 @@ export default {
   text-overflow: ellipsis;
 }
 
-/* ── Error notice ── */
 .auth-notice {
   background: rgba(224, 112, 112, 0.1);
   border: 1px solid rgba(224, 112, 112, 0.3);
@@ -733,7 +685,6 @@ export default {
   font-size: 0.9rem;
 }
 
-/* ── Footer ── */
 .wedding-footer {
   position: relative;
   z-index: 1;
@@ -744,7 +695,6 @@ export default {
   letter-spacing: 0.06em;
 }
 
-/* ── Transitions ── */
 .fade-enter-active,
 .fade-leave-active {
   transition:
@@ -766,7 +716,6 @@ export default {
   transform: translateY(20px);
 }
 
-/* ── Responsive ── */
 @media (max-width: 576px) {
   .hero {
     padding: 1.5rem 1rem 0;
@@ -781,8 +730,7 @@ export default {
 
 @media (prefers-reduced-motion: reduce) {
   .particle,
-  .rings-wrapper,
-  .upload-spinner {
+  .rings-wrapper {
     animation: none;
   }
   .drop-zone {

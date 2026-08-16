@@ -37,3 +37,8 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# Environment variables — nu se commit niciodată
+.env
+.env.*
+!.env.example
