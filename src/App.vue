@@ -89,6 +89,7 @@
               :style="{ width: overallProgress + '%' }"
             ></div>
           </div>
+          <p v-if="etaText" class="eta-label">{{ etaText }}</p>
           <p class="drop-zone__hint">
             Te rugăm nu închide tab-ul și nu bloca ecranul telefonului cât timp
             se încarcă ✦
@@ -236,6 +237,16 @@
       <p>
         Cu drag, {{ config.bride }} &amp; {{ config.groom }} · {{ config.date }}
       </p>
+      <p class="powered-by">
+        Powered by
+        <a
+          href="https://www.instagram.com/vasilesgo/"
+          target="_blank"
+          rel="noopener noreferrer"
+          >vasilesgo</a
+        >
+        și cumătrul Claudiu
+      </p>
     </footer>
   </div>
 </template>
@@ -274,6 +285,11 @@ export default {
       queue: [], // toate fisierele din sesiunea curenta, fiecare cu status + progress propriu
       showSummary: false,
       wakeLock: null,
+      // ── ETA tracking ──
+      totalBytes: 0, // suma marimilor tuturor fisierelor din coada
+      bytesUploaded: 0, // bytes confirmati trimisi
+      etaSeconds: null, // secunde estimate ramase
+      speedSample: { time: 0, bytes: 0 }, // pentru calculul vitezei medii recente
     };
   },
 
@@ -291,6 +307,19 @@ export default {
     },
     doneCount() {
       return this.uploadedFiles.length + this.errorFiles.length;
+    },
+    etaText() {
+      if (this.etaSeconds == null || this.etaSeconds <= 0) return null;
+      const s = Math.round(this.etaSeconds);
+      if (s < 60) return `~${s} sec. rămase`;
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      if (m < 60) {
+        return rem > 0 ? `~${m} min ${rem} sec. rămase` : `~${m} min rămase`;
+      }
+      const h = Math.floor(m / 60);
+      const remM = m % 60;
+      return `~${h}h ${remM}min rămase`;
     },
   },
 
@@ -356,6 +385,15 @@ export default {
     async startUploadQueue() {
       if (this.isUploading) return; // deja ruleaza, fisierele noi se alatura cozii
       this.isUploading = true;
+
+      // init ETA tracking pe intreaga coada ramasa
+      this.totalBytes = this.queue
+        .filter((f) => f.status === "pending" || f.status === "uploading")
+        .reduce((sum, f) => sum + f.file.size, 0);
+      this.bytesUploaded = 0;
+      this.etaSeconds = null;
+      this.speedSample = { time: Date.now(), bytes: 0 };
+
       await this.requestWakeLock();
 
       const workers = Array.from({ length: CONCURRENCY }, () =>
@@ -365,6 +403,7 @@ export default {
 
       await this.releaseWakeLock();
       this.isUploading = false;
+      this.etaSeconds = null;
       this.showSummary = this.uploadedFiles.length > 0;
     },
 
@@ -482,6 +521,54 @@ export default {
       }
     },
 
+    // ── Initiere sesiune cu retry — plasa de siguranta la varf de trafic ───────
+    // Cand multi invitati pornesc simultan, Google poate throttla (429/403).
+    // Reincercam automat cu backoff in loc sa aratam eroare invitatului.
+    async createSessionWithRetry(item, mimeType, size) {
+      let attempt = 0;
+      while (true) {
+        try {
+          const sessionRes = await fetch("/api/upload-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filename: item.driveName,
+              mimeType,
+              size,
+            }),
+          });
+
+          if (sessionRes.ok) {
+            const { uploadUrl } = await sessionRes.json();
+            if (!uploadUrl) throw new Error("Lipsește URL-ul de sesiune");
+            return uploadUrl;
+          }
+
+          // 429/403/5xx = temporar, merita reincercat. 4xx (ex. 400) = definitiv.
+          const retryable =
+            sessionRes.status === 429 ||
+            sessionRes.status === 403 ||
+            sessionRes.status >= 500;
+          if (!retryable) {
+            const err = await sessionRes.json().catch(() => ({}));
+            throw new Error(err.error || "Nu am putut porni upload-ul");
+          }
+          throw new Error(`retryable HTTP ${sessionRes.status}`);
+        } catch (e) {
+          attempt++;
+          if (attempt > MAX_RETRIES) {
+            throw new Error(
+              "Serverul e ocupat momentan. Încearcă din nou în câteva secunde ✦",
+            );
+          }
+          // backoff exponential cu jitter, ca sa nu reincerce toti in aceeasi clipa
+          const backoff =
+            Math.min(1000 * 2 ** attempt, 15000) + Math.random() * 500;
+          await new Promise((r) => setTimeout(r, backoff));
+        }
+      }
+    },
+
     // ── Upload-ul propriu-zis: sesiune + chunk-uri + reluare ────────────────────
     async uploadFile(item) {
       const file = item.file;
@@ -500,23 +587,14 @@ export default {
           this.clearStoredSession(item);
           return; // era deja complet
         }
+        // bytes deja pe Google nu se numara in viteza sesiunii curente
+        item.progress = (offset / file.size) * 100;
       } else {
-        const sessionRes = await fetch("/api/upload-session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: item.driveName,
-            mimeType,
-            size: file.size,
-          }),
-        });
-
-        if (!sessionRes.ok) {
-          const err = await sessionRes.json().catch(() => ({}));
-          throw new Error(err.error || "Nu am putut porni upload-ul");
-        }
-
-        ({ uploadUrl } = await sessionRes.json());
+        uploadUrl = await this.createSessionWithRetry(
+          item,
+          mimeType,
+          file.size,
+        );
         this.saveSession(item, uploadUrl);
       }
 
@@ -536,6 +614,11 @@ export default {
             mimeType,
           );
           attempt = 0; // reset dupa succes
+          const advanced = (result.nextOffset ?? file.size) - offset;
+          if (advanced > 0) {
+            this.bytesUploaded += advanced;
+            this.updateEta();
+          }
           if (result.done) {
             item.progress = 100;
             this.clearStoredSession(item);
@@ -555,6 +638,31 @@ export default {
           await new Promise((r) => setTimeout(r, backoff));
         }
       }
+    },
+
+    // ── Estimare timp ramas ─────────────────────────────────────────────────
+    // Foloseste viteza medie recenta (nu cea instantanee, ca sa fie stabila)
+    updateEta() {
+      const now = Date.now();
+      const elapsed = (now - this.speedSample.time) / 1000; // secunde de la ultima masuratoare
+
+      // recalculam viteza doar la fiecare ~1.5s, ca sa nu sara ETA-ul haotic
+      if (elapsed < 1.5) return;
+
+      const bytesDelta = this.bytesUploaded - this.speedSample.bytes;
+      const speed = bytesDelta / elapsed; // bytes/secunda
+
+      if (speed > 0) {
+        const remaining = this.totalBytes - this.bytesUploaded;
+        const rawEta = remaining / speed;
+        // netezire: media intre estimarea veche si cea noua, evita salturile
+        this.etaSeconds =
+          this.etaSeconds == null
+            ? rawEta
+            : this.etaSeconds * 0.5 + rawEta * 0.5;
+      }
+
+      this.speedSample = { time: now, bytes: this.bytesUploaded };
     },
 
     putChunk(uploadUrl, chunk, start, end, totalSize, mimeType) {
@@ -634,6 +742,17 @@ export default {
 
 <style scoped>
 @import url("https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap");
+
+.powered-by {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.5rem;
+}
+.powered-by a {
+  color: var(--gold);
+  text-decoration: none;
+  font-weight: 500;
+}
 
 :root {
   --gold: #e8c97a;
@@ -827,6 +946,13 @@ export default {
 .uploading-label {
   font-size: 0.9rem;
   color: var(--muted);
+}
+.eta-label {
+  font-size: 0.8rem;
+  color: var(--gold);
+  opacity: 0.85;
+  margin: 0;
+  letter-spacing: 0.02em;
 }
 .progress-track {
   width: 100%;
